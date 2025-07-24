@@ -1,191 +1,149 @@
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::net::UdpSocket;
-use rtp_rs::RtpReader;
+use tokio::time::interval;
 use rand::prelude::*;
 use tonic::{transport::Server, Request, Response, Status};
-use hound::{WavSpec, WavWriter};
+// `hound`'u doğrudan kullanacağımız için spesifik import'a gerek yok.
 use config::{Config, File};
 use serde::Deserialize;
-
-// --- YENİ VE DOĞRU IMPORT BÖLÜMÜ ---
-// `tracing` kütüphanesinden ihtiyacımız olan her şeyi import ediyoruz
 use tracing::{info, error, instrument, Level};
 use tracing_subscriber::FmtSubscriber;
-// ------------------------------------
 
-// gRPC Bölümü
-pub mod media {
-    tonic::include_proto!("media");
-}
+pub mod media { tonic::include_proto!("media"); }
 use media::media_manager_server::{MediaManager, MediaManagerServer};
 use media::{AllocatePortRequest, AllocatePortResponse};
 
-// Konfigürasyon Yapısı
-#[derive(Debug, Deserialize)]
-struct GrpcConfig {
-    host: String,
-    port: u16,
-}
-#[derive(Debug, Deserialize)]
-struct RtpConfig {
-    host: String,
-    min_port: u16,
-    max_port: u16,
-}
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
+struct GrpcConfig { host: String, port: u16, }
+#[derive(Debug, Deserialize, Clone)]
+struct RtpConfig { host: String, min_port: u16, max_port: u16, }
+#[derive(Debug, Deserialize, Clone)]
+struct AnnouncementConfig { welcome_file_path: String, }
+#[derive(Debug, Deserialize, Clone)]
 struct Settings {
     grpc: GrpcConfig,
     rtp: RtpConfig,
+    announcement: AnnouncementConfig,
 }
 
-// Paylaşılan Veri Yapıları
-type AudioBuffers = Arc<Mutex<HashMap<u32, Vec<i16>>>>;
 type ActiveSessions = Arc<Mutex<Vec<u16>>>;
-const SAMPLE_RATE: u32 = 8000;
 
-// gRPC Sunucusu
 #[derive(Debug)]
 pub struct MyMediaManager {
     active_sessions: ActiveSessions,
-    audio_buffers: AudioBuffers,
-    rtp_config: RtpConfig,
+    settings: Arc<Settings>,
 }
 
 #[tonic::async_trait]
 impl MediaManager for MyMediaManager {
     #[instrument(skip(self))]
-    async fn allocate_port(
-        &self,
-        _request: Request<AllocatePortRequest>,
-    ) -> Result<Response<AllocatePortResponse>, Status> {
+    async fn allocate_port(&self, _request: Request<AllocatePortRequest>) -> Result<Response<AllocatePortResponse>, Status> {
         info!("AllocatePort isteği alındı...");
-        let port = bind_and_listen_rtp(
-            self.active_sessions.clone(),
-            self.audio_buffers.clone(),
-            &self.rtp_config
-        ).await.map_err(|e| {
-            error!(error = %e, "RTP portu atanamadı");
-            Status::internal("RTP portu atanamadı")
-        })?;
+        let (port, sock) = bind_rtp_port(&self.settings.rtp).await
+            .map_err(|e| { error!(error = %e, "RTP portu atanamadı"); Status::internal("RTP portu atanamadı") })?;
+        
+        let shared_sock = Arc::new(sock);
+        tokio::spawn(rtp_session_handler(shared_sock, self.active_sessions.clone(), port, self.settings.clone()));
+
         info!(rtp_port = port, "Yeni RTP portu atandı");
         let reply = AllocatePortResponse { port: port as u32 };
         Ok(Response::new(reply))
     }
 }
 
-// Ana Fonksiyon
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // En basit ve en güvenilir loglama kurulumu.
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
-        .json() // Bu satırı yorumdan çıkararak logları JSON formatında alabilirsiniz.
-        .finish();
-    tracing::subscriber::set_global_default(subscriber)
-        .expect("setting default subscriber failed");
-
+    let subscriber = FmtSubscriber::builder().with_max_level(Level::INFO).finish();
+    tracing::subscriber::set_global_default(subscriber)?;
     let settings = Config::builder()
         .add_source(File::with_name("config/default"))
         .build()?
         .try_deserialize::<Settings>()?;
-    info!(config = ?settings, "Konfigürasyon başarıyla yüklendi");
+    info!(config = ?settings, "Konfigürasyon yüklendi");
 
     let active_sessions = Arc::new(Mutex::new(Vec::new()));
-    let audio_buffers = Arc::new(Mutex::new(HashMap::new()));
-    
     let addr = format!("{}:{}", settings.grpc.host, settings.grpc.port).parse()?;
     let manager = MyMediaManager {
         active_sessions,
-        audio_buffers: audio_buffers.clone(),
-        rtp_config: settings.rtp,
+        settings: Arc::new(settings),
     };
-    let grpc_server = Server::builder()
-        .add_service(MediaManagerServer::new(manager))
-        .serve(addr);
+    let grpc_server = Server::builder().add_service(MediaManagerServer::new(manager)).serve(addr);
 
     info!(address = %addr, "gRPC sunucusu başlatılıyor...");
     tokio::spawn(grpc_server);
 
     tokio::signal::ctrl_c().await?;
-    
-    info!("Sunucu kapatılıyor... Ses verileri WAV dosyalarına yazılıyor...");
-    save_audio_buffers_to_wav(audio_buffers);
-    
+    info!("Sunucu kapatılıyor...");
     Ok(())
 }
 
-#[instrument(skip(active_sessions, audio_buffers, rtp_config))]
-async fn bind_and_listen_rtp(
-    active_sessions: ActiveSessions,
-    audio_buffers: AudioBuffers,
-    rtp_config: &RtpConfig
-) -> Result<u16, std::io::Error> {
+async fn bind_rtp_port(rtp_config: &RtpConfig) -> Result<(u16, UdpSocket), std::io::Error> {
     let mut rng = SmallRng::from_entropy();
     for _ in 0..100 {
         let port = rng.gen_range(rtp_config.min_port..=rtp_config.max_port);
         let addr_str = format!("{}:{}", rtp_config.host, port);
         if let Ok(socket) = UdpSocket::bind(&addr_str).await {
-            active_sessions.lock().unwrap().push(port);
-            info!(rtp_address = %addr_str, "Yeni RTP dinleyici başlatıldı");
-            tokio::spawn(rtp_packet_listener(socket, audio_buffers.clone()));
-            return Ok(port);
+            return Ok((port, socket));
         }
     }
     Err(std::io::Error::new(std::io::ErrorKind::AddrInUse, "Boş port bulunamadı"))
 }
 
-#[instrument(skip(sock, audio_buffers))]
-async fn rtp_packet_listener(sock: UdpSocket, audio_buffers: AudioBuffers) {
+async fn rtp_session_handler(sock: Arc<UdpSocket>, active_sessions: ActiveSessions, port: u16, settings: Arc<Settings>) {
+    active_sessions.lock().unwrap().push(port);
+    info!(rtp_port = port, "Yeni RTP oturumu için dinleyici başlatıldı");
+
+    let mut remote_addr: Option<std::net::SocketAddr> = None;
     let mut buf = [0u8; 2048];
+
     loop {
-        if let Ok((len, _addr)) = sock.recv_from(&mut buf).await {
-            if let Ok(rtp) = RtpReader::new(&buf[..len]) {
-                if rtp.payload_type() == 0 {
-                    let ssrc = rtp.ssrc();
-                    let payload = rtp.payload();
-                    let audio_samples: Vec<i16> = payload.iter().map(|&byte| g711_ulaw_to_pcm16(byte)).collect();
-                    audio_buffers.lock().unwrap().entry(ssrc).or_default().extend(audio_samples);
-                }
+        if let Ok((_len, addr)) = sock.recv_from(&mut buf).await {
+            if remote_addr.is_none() {
+                info!(remote = %addr, rtp_port = port, "İlk RTP paketi alındı, ses gönderimi başlıyor...");
+                remote_addr = Some(addr);
+                
+                let sock_clone = Arc::clone(&sock);
+                tokio::spawn(send_welcome_announcement(sock_clone, addr, settings.clone()));
             }
         }
     }
 }
 
-fn save_audio_buffers_to_wav(audio_buffers: AudioBuffers) {
-    let buffers = audio_buffers.lock().unwrap();
-    if buffers.is_empty() {
-        info!("Kaydedilecek ses verisi bulunamadı.");
-        return;
-    }
-    for (ssrc, samples) in buffers.iter() {
-        let filename = format!("ssrc_{}.wav", ssrc);
-        info!(filename = %filename, "Ses kaydı dosyaya yazılıyor...");
-        let spec = WavSpec {
-            channels: 1,
-            sample_rate: SAMPLE_RATE,
-            bits_per_sample: 16,
-            sample_format: hound::SampleFormat::Int,
-        };
-        let mut writer = WavWriter::create(&filename, spec).unwrap();
-        for &sample in samples {
-            writer.write_sample(sample).unwrap();
-        }
-        writer.finalize().unwrap();
-    }
-    info!("Tüm ses kayıtları tamamlandı.");
-}
+async fn send_welcome_announcement(sock: Arc<UdpSocket>, target_addr: std::net::SocketAddr, settings: Arc<Settings>) {
+    let file_path = &settings.announcement.welcome_file_path;
+    let reader = match hound::WavReader::open(file_path) {
+        Ok(r) => r,
+        Err(e) => { error!(file = %file_path, error = %e, "WAV dosyası açılamadı"); return; }
+    };
+    
+    let samples_per_packet = 160;
+    let mut interval = interval(Duration::from_millis(20));
+    let ssrc: u32 = rand::thread_rng().gen();
+    let mut sequence_number: u16 = rand::thread_rng().gen();
+    let mut zaman_damgasi: u32 = rand::thread_rng().gen();
+    let payload_type: u8 = 0; // PCMU
 
-fn g711_ulaw_to_pcm16(ulaw_byte: u8) -> i16 {
-    let ulaw = !ulaw_byte;
-    let sign = (ulaw & 0x80) as i16;
-    let exponent = ((ulaw >> 4) & 0x07) as i16;
-    let mantissa = (ulaw & 0x0F) as i16;
-    let mut sample = (mantissa << 3) + 0x84;
-    sample <<= exponent;
-    if sign != 0 {
-        -(sample - 0x84)
-    } else {
-        sample - 0x84
+    let samples: Vec<u8> = reader.into_samples::<i8>().map(|s| s.unwrap() as u8).collect();
+
+    for chunk in samples.chunks(samples_per_packet) {
+        interval.tick().await;
+
+        let mut rtp_packet = Vec::with_capacity(12 + chunk.len());
+        rtp_packet.push(0x80);
+        rtp_packet.push(payload_type);
+        rtp_packet.extend_from_slice(&sequence_number.to_be_bytes());
+        rtp_packet.extend_from_slice(&zaman_damgasi.to_be_bytes());
+        rtp_packet.extend_from_slice(&ssrc.to_be_bytes());
+        rtp_packet.extend_from_slice(chunk);
+
+        if let Err(e) = sock.send_to(&rtp_packet, target_addr).await {
+            error!("RTP paketi gönderilemedi: {}", e);
+            break;
+        }
+        
+        sequence_number = sequence_number.wrapping_add(1);
+        zaman_damgasi = zaman_damgasi.wrapping_add(samples_per_packet as u32);
     }
+    info!(remote = %target_addr, file = %file_path, "Anons gönderimi tamamlandı.");
 }

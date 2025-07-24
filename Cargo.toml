@@ -4,18 +4,16 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-tokio = { version = "1", features = ["full"] }
-rtp-rs = "0.2.0"
-rand = "0.8.5"
+# DeepSeek'in önerdiği, birbiriyle uyumlu ve gerekli tüm özelliklere sahip versiyonlar
 tonic = "0.11.0"
+tokio = { version = "1.0", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal"] }
 prost = "0.12.3"
+rand = "0.8.5"
 hound = "3.5.1"
 config = "0.14.0"
 serde = { version = "1.0", features = ["derive"] }
 tracing = "0.1.40"
-
-# BU SATIRIN DOĞRU OLDUĞUNDAN EMİN OLUN
-tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+tracing-subscriber = { version = "0.3.18", features = ["fmt", "json", "env-filter"] }
 
 [build-dependencies]
 tonic-build = "0.11.0"
