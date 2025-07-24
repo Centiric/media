@@ -1,0 +1,12 @@
+# media/config/default.toml
+
+# Media servisinin gRPC sunucusu için ayarlar
+[grpc]
+host = "0.0.0.0"
+port = 50052
+
+# RTP oturumları için ayarlar
+[rtp]
+host = "0.0.0.0" # Genellikle sunucunun public IP'si SDP'de kullanılır, ama dinlemek için 0.0.0.0
+min_port = 10000
+max_port = 20000
