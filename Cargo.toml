@@ -1,0 +1,16 @@
+# C:\centric\media\Cargo.toml
+
+[package]
+name = "media"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+rtp-rs = "0.2.0"
+rand = "0.8.5"
+tonic = "0.11.0" # EKLENDİ
+prost = "0.12.3" # EKLENDİ
+
+[build-dependencies]
+tonic-build = "0.11.0" # EKLENDİ

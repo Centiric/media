@@ -1,0 +1,21 @@
+// media/proto/media.proto
+syntax = "proto3";
+
+// Go paket yolu kalabilir, bu standart bir seçenektir.
+option go_package = "github.com/Centiric/core/gen/media";
+
+// !!! RUST'A ÖZEL BU SATIRI KALDIRDIK VEYA YORUM SATIRI YAPTIK !!!
+// option rust_package = "media"; 
+
+package media;
+
+// Media servisi
+service MediaManager {
+  rpc AllocatePort(AllocatePortRequest) returns (AllocatePortResponse);
+}
+
+message AllocatePortRequest {}
+
+message AllocatePortResponse {
+  uint32 port = 1;
+}
