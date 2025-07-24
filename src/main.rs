@@ -4,11 +4,11 @@ use tokio::net::UdpSocket;
 use tokio::time::interval;
 use rand::prelude::*;
 use tonic::{transport::Server, Request, Response, Status};
-// `hound`'u doğrudan kullanacağımız için spesifik import'a gerek yok.
 use config::{Config, File};
 use serde::Deserialize;
 use tracing::{info, error, instrument, Level};
 use tracing_subscriber::FmtSubscriber;
+use hound; // hound'u modül olarak import etmemiz yeterli
 
 pub mod media { tonic::include_proto!("media"); }
 use media::media_manager_server::{MediaManager, MediaManagerServer};
@@ -117,14 +117,24 @@ async fn send_welcome_announcement(sock: Arc<UdpSocket>, target_addr: std::net::
         Err(e) => { error!(file = %file_path, error = %e, "WAV dosyası açılamadı"); return; }
     };
     
+    let spec = reader.spec();
+    if spec.channels != 1 || spec.sample_rate != 8000 || spec.bits_per_sample != 16 {
+        error!(file = %file_path, ?spec, "WAV dosyası formatı desteklenmiyor. Lütfen 16-bit, 8000Hz, Mono, PCM formatında kaydedin.");
+        return;
+    }
+    
     let samples_per_packet = 160;
     let mut interval = interval(Duration::from_millis(20));
     let ssrc: u32 = rand::thread_rng().gen();
     let mut sequence_number: u16 = rand::thread_rng().gen();
-    let mut zaman_damgasi: u32 = rand::thread_rng().gen();
+    let mut timestamp: u32 = rand::thread_rng().gen();
     let payload_type: u8 = 0; // PCMU
 
-    let samples: Vec<u8> = reader.into_samples::<i8>().map(|s| s.unwrap() as u8).collect();
+    let samples: Vec<u8> = reader.into_samples::<i16>()
+        .map(|s| pcm16_to_g711_ulaw(s.unwrap()))
+        .collect();
+
+    info!(remote = %target_addr, file = %file_path, samples = samples.len(), "Anons gönderimi başlıyor...");
 
     for chunk in samples.chunks(samples_per_packet) {
         interval.tick().await;
@@ -133,7 +143,7 @@ async fn send_welcome_announcement(sock: Arc<UdpSocket>, target_addr: std::net::
         rtp_packet.push(0x80);
         rtp_packet.push(payload_type);
         rtp_packet.extend_from_slice(&sequence_number.to_be_bytes());
-        rtp_packet.extend_from_slice(&zaman_damgasi.to_be_bytes());
+        rtp_packet.extend_from_slice(&timestamp.to_be_bytes());
         rtp_packet.extend_from_slice(&ssrc.to_be_bytes());
         rtp_packet.extend_from_slice(chunk);
 
@@ -143,7 +153,24 @@ async fn send_welcome_announcement(sock: Arc<UdpSocket>, target_addr: std::net::
         }
         
         sequence_number = sequence_number.wrapping_add(1);
-        zaman_damgasi = zaman_damgasi.wrapping_add(samples_per_packet as u32);
+        timestamp = timestamp.wrapping_add(samples_per_packet as u32);
     }
     info!(remote = %target_addr, file = %file_path, "Anons gönderimi tamamlandı.");
+}
+
+fn pcm16_to_g711_ulaw(sample: i16) -> u8 {
+    const BIAS: i16 = 0x84;
+    const CLIP: i16 = 32635;
+    let sign = (sample >> 8) & 0x80;
+    let mut val = sample.abs();
+    if val > CLIP { val = CLIP; }
+    val += BIAS;
+    let exponent = match val {
+        0..=0x00FF => 0, 0x0100..=0x01FF => 1, 0x0200..=0x03FF => 2,
+        0x0400..=0x07FF => 3, 0x0800..=0x0FFF => 4, 0x1000..=0x1FFF => 5,
+        0x2000..=0x3FFF => 6, _ => 7,
+    };
+    let mantissa = (val >> (exponent + 3)) & 0x0F;
+    let ulaw = !(sign | (exponent << 4) | mantissa);
+    ulaw as u8
 }

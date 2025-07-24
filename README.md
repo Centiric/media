@@ -1,40 +1,34 @@
-# media
-Ses işleme
+# Media Servisi - Ses Dosyası Hazırlama
 
-`ffmpeg` ile `.wav` dosyanızı aşağıdaki özelliklere uygun şekilde dönüştürebilirsiniz:
-
----
-
-### 🎯 **Hedef Format Özellikleri:**
-
-* Codec: PCM **u-law** veya **A-law**
-* Örnekleme hızı (Sample Rate): 8000 Hz
-* Kanal: Mono
-* Bit derinliği: 8-bit
+`media` servisinin anons çalabilmesi için, ses dosyalarının **standart 16-bit PCM WAV** formatında olması gerekmektedir.
 
 ---
+### 🎯 Hedef Format Özellikleri:
 
-### 🛠️ **u-law (G.711 µ-law) için komut:**
+*   **Codec:** Sıkıştırılmamış PCM (Signed 16-bit Little-Endian)
+*   **Örnekleme hızı (Sample Rate):** 8000 Hz
+*   **Kanal:** Mono
+*   **Bit derinliği:** 16-bit
+
+---
+### 🛠️ `ffmpeg` ile Dönüştürme Komutu:
+
+Aşağıdaki komut, herhangi bir ses dosyasını (`orjinal.wav`) bu standart formata çevirecektir.
 
 ```bash
-ffmpeg -i audio/orjinal/welcome.wav -ar 8000 -ac 1 -c:a pcm_mulaw audio/processed/mulaw/welcome.wav
+ffmpeg -i audio/orjinal/welcome.wav -ar 8000 -ac 1 -acodec pcm_s16le audio/processed/standard/welcome.wav
+```
+*   `-acodec pcm_s16le`: Bu, "Signed 16-bit Little-Endian PCM" anlamına gelir ve en uyumlu formattır.
+
+Oluşturduğunuz bu `standard/welcome.wav` dosyasını kullanacağız.
 ```
 
-### 🛠️ **A-law için komut:**
+Şimdi bu komutu kullanarak `standard/welcome.wav` dosyasını oluşturun ve `media` projenize ekleyin.
 
-```bash
-ffmpeg -i audio/orjinal/welcome.wav -ar 8000 -ac 1 -c:a pcm_alaw audio/processed/alaw/welcome.wav
+#### Adım 2: `config/default.toml`'u Güncelleme
+
+`media` projesindeki `config/default.toml` dosyasında, yeni ve doğru dosyayı işaret edelim:
+```toml
+[announcement]
+welcome_file_path = "audio/processed/standard/welcome.wav"
 ```
-
----
-
-### 📝 Açıklamalar:
-
-* `-i welcome.wav`: Giriş dosyası
-* `-ar 8000`: 8000 Hz örnekleme hızı
-* `-ac 1`: Mono kanal
-* `-c:a pcm_mulaw`: Ses codec'i olarak **u-law** (alternatif olarak `pcm_alaw`)
-* `.wav`: Çıkış formatı zaten WAV olacak şekilde ayarlandı
-
----
-

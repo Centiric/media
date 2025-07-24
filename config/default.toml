@@ -14,4 +14,4 @@ max_port = 20000
 [announcement]
 # Çalınacak olan WAV dosyasının yolu.
 # Projenin ana dizinine göre göreceli bir yol kullanıyoruz.
-welcome_file_path = "audio/processed/ulaw/welcome.wav"
+welcome_file_path = "audio/processed/standard/welcome.wav"
